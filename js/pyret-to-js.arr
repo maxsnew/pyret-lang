@@ -59,86 +59,11 @@ js-id-of = block:
   end
 end
 
-fun program-to-cps-js(ast, runtime-ids):
-  cases(A.Program) ast:
-    # import/provide ignored
-    | s_program(_, _, block) =>
-      cases(A.Expr) block :
-        | s_block(l, stmts) =>
-
-          bindings = for list.fold(bs from "", id from ["nothing"] + runtime-ids):
-            bs + format("var ~a = NAMESPACE.get('~a');\n", [js-id-of(id), id])
-          end
-
-          ids = block-ids(block)
-          namespace-fields = ids.map(fun(id): A.s_data_field(l, A.s_str(l, id), A.s_id(l, id));)
-          fun make-final-object(val):
-            A.s_obj(l, [
-                A.s_data_field(l, A.s_str(l, "value"), val),
-                A.s_data_field(l, A.s_str(l, "namespace"), A.s_obj(l, namespace-fields))
-              ])
-          end
-          stmts-for-cps = if stmts.length() == 0:
-              [make-final-object(A.s_id(l, "nothing"))]
-            else:
-              fun sequence-wrap-last(ss):
-                cases(list.List) ss:
-                  | link(f, r) =>
-                    cases(list.List) r:
-                      | empty =>
-                        if A.is-s_let(f) or A.is-s_var(f):
-                          [f, make-final-object(A.s_id(l, "nothing"))]
-                        else:
-                          [make-final-object(f)]
-                        end
-                      | link(_, _) => [f] + sequence-wrap-last(r)
-                    end
-                end
-              end
-              sequence-wrap-last(stmts)
-            end
-          block-for-cps = A.s_block(l, stmts-for-cps)
-          ids-to-export = toplevel-ids(ast)
-          export-fields = for list.fold(export from "", id from ids-to-export):
-            export + format("EXPORT_NAMESPACE = EXPORT_NAMESPACE.set(\"~a\", ~a)\n",
-              [id, js-id-of(id)])
-          end
-          # function(R, N, success, fail)
-          # function(R, N, conts)
-          # $K is { success : NormalResult -> Undef, failure : FailResult -> Undef }
-          format("(function(RUNTIME, NAMESPACE, $K) {
-            try {
-              ~a
-              var RESULT;
-              (function() {
-                var k = RUNTIME.makeFunction(function(RESULT) {
-                    var namespace = RUNTIME.getField(RESULT, 'namespace');
-                    var value = RUNTIME.getField(RESULT, 'value');
-                    // TODO(joe): Relying on the representation here to get off
-                    // the ground, via the pyretToJSDict endpoint.  Need to codify
-                    // namespaces and their interaction with runtime precisely
-                    var EXPORT_NAMESPACE = Namespace(RUNTIME.pyretToJSDict(namespace));
-                    $K.success(RUNTIME.makeNormalResult(value, EXPORT_NAMESPACE));
-                  });
-                var f = RUNTIME.makeFunction(function(ERR) {
-                    $K.failure(RUNTIME.makeFailResult(ERR));
-                  });
-                (function() { return ~a})().app(k);
-              })();
-            } catch(e) {
-              $K.failure(RUNTIME.makeFailResult(e));
-            }
-          })", [bindings, expr-to-js(cps(block-for-cps))])
-      end
-  end
-end
-
-
 fun program-to-js(ast, runtime-ids):
   cases(A.Program) ast:
     # import/provide ignored
     | s_program(_, _, block) =>
-      cases(A.Expr) block :
+      cases(A.Expr) normalize-term(block) :
         | s_block(_, stmts) =>
           bindings = for list.fold(bs from "", id from runtime-ids):
             bs + format("var ~a = NAMESPACE.get('~a');\n", [js-id-of(id), id])
@@ -189,63 +114,94 @@ fun program-to-js(ast, runtime-ids):
   end
 end
 
-fun do-block(str):
-  format("(function() { ~a })()", [str])
+fun normalize-term(M):
+  normalize(M, fun(x): x;)
 end
 
-fun arg(l, name): A.s_bind(l, name, A.a_blank);
-fun lam(l, args, body): A.s_lam(l, [], args, A.a_blank, "anon lam", body, A.s_block(l, []));
-app = A.s_app
-
-K = "$k"
-fun mk-K(): gensym("$k");
-
-fun cps(ast):
-  # punt can be used when you don't know how to CPS yet
-  fun punt():
-    print("Punting on: " + torepr(ast))
-    l = ast.l
-    lam(l, [arg(l, K)], A.s_app(l, A.s_id(l, K), [ast]));
-  id = A.s_id
-  cases(A.Expr) ast:
-    | s_block(l, pre-stmts) =>
-      stmts = if pre-stmts.length() == 0: [A.s_id(l, "nothing")] else: pre-stmts;
-      ids = block-ids(ast)
-      vars = ids.map(fun(v): A.s_var(l, A.s_bind(l, v, A.a_blank), A.s_id(l, "nothing"));)
-
-      cont = for fold(
-            k from fun(e): A.s_app(l, cps(e), [A.s_id(l, K)]) end,
-            s from stmts.take(stmts.length() - 1).reverse()):
-        fun(e): A.s_app(l, cps(s), [lam(l, [arg(l, "ignored")], k(e))]);;
-
-      body = lam(l, [arg(l, K)], cont(stmts.last()))
-
-      A.s_block(l, vars + [body])
-    | s_app(l, f, es) =>
-      print("Args: " + torepr(es))
-      if es.length() == 1:
-        print("Length was one for: " + torepr(ast))
-        lam(l, [arg(l, K)],
-          app(l, cps(f), [lam(l, [arg(l, "$fv")],
-            app(l, cps(es.first), [lam(l, [arg(l, "$argv")],
-              app(l, id(l, "$fv"), [id(l, K), id(l, "$argv")]))]))]))
+fun normalize-name(M, k):
+  l = error.location("", 0, 0)
+  normalize(M, fun(N):
+      if A.is-s_bool(N) or A.is-s_num(N) or A.is-s_str(N):
+        k(N)
       else:
-        punt()
+        t = gensym("temp")
+        A.s_block(l, [
+            A.s_var(l, A.s_bind(l, t, A.a_blank), N),
+            k(A.s_id(l, t))
+          ])
       end
-    # Cheating a little here: Since we explicitly lift the block variables
-    # above, we just turn lets and vars into assignment statements, and rely
-    # on the well-formedness checking that's already happened
-    | s_let(l, b, e) => cps(A.s_assign(l, b.id, e))
-    | s_var(l, b, e) => cps(A.s_assign(l, b.id, e))
-    | s_num(l, n) =>
-      lam(l, [arg(l, K)], A.s_app(l, A.s_id(l, K), [A.s_num(l, n)]))
-    | s_bracket(l, obj, field) =>
-      lam(l, [arg(l, K)],
-        app(l, cps(obj), [lam(l, [arg(l, "$obj")],
-                    app(l, A.s_id(l, K), [
-                        A.s_bracket(l, id(l, "$obj"), field)]))]))
-    | else => punt()
+    end)
+end
+
+fun normalize-name-rec(M, k):
+  l = error.location("", 0, 0)
+  cases (List) M:
+    | empty => k([])
+    | link(fst, rst) =>
+      normalize-name(fst, fun(t):
+          normalize-name-rec(rst, fun(t-rec):
+              k(link(t, t-rec))
+            end)
+        end)
   end
+end
+
+fun normalize-program(M):
+  cases (List) M:
+    | empty => empty
+    | link(fst, rst) => link(normalize-term(fst), normalize-program(rst))
+  end
+end
+
+fun normalize(M, k):
+  cases (A.Expr) M:
+
+    | s_block(l, stmts) =>
+      k(A.s_block(l, normalize-program(stmts)))
+
+    | s_let(l, name, expr) =>
+      k(A.s_let(l, name, normalize-term(expr)))
+
+    | s_if_else(l, branches, _else) =>
+      s-if = for fold(acc from _else, branch from branches):
+        A.s_if_else(l, [branch], acc)
+      end
+
+      if A.is-s_if_else(s-if):
+        cond = s-if.branches.first.test
+        consq = s-if.branches.first.body
+        altern = s-if._else
+        normalize-name(cond, fun(t):
+            k(A.s_if_else(l, [A.s_if_branch(l, t, normalize-term(consq))], normalize-term(altern)))
+          end)
+      else:
+        k(normalize-term(s-if))
+      end
+      
+    | s_lam(l, params, args, ann, doc, body, _check) =>
+      k(A.s_lam(l, params, args, ann, doc, normalize-term(body), _check))
+
+    | s_app(l, _fun, args) =>
+      normalize-name(_fun, fun(t):
+          normalize-name-rec(args, fun(t-rec):
+              k(A.s_app(l, t, t-rec))
+            end)
+        end)
+      
+    | else => k(M)
+  end
+end
+
+# _ = print(normalize-term(print(A.parse-tc("
+#         test-print(2 + 3)
+#         nothing
+#         ", "", { check : false, env : {
+#               builtins: nothing,
+#               test-print: nothing
+#         } }).block)))
+
+fun do-block(str):
+  format("(function() { ~a })()", [str])
 end
 
 fun expr-to-js(ast):
@@ -276,6 +232,14 @@ fun expr-to-js(ast):
       end
     | s_num(_, n) =>
       format("RUNTIME.makeNumber(~a)", [n])
+    | s_bool(_, b) =>
+      format("RUNTIME.makeBool(~a)", [b])
+    | s_if_else(_, branches, _else) =>
+      elseifs = for list.fold(bs from "", b from branches.rest):
+        bs + format("else if (RUNTIME.isTrue(~a)) { return ~a; } ", [expr-to-js(b.test), expr-to-js(b.body)])
+      end
+      do-block(format("if (RUNTIME.isTrue(~a)) { return ~a; } ~aelse { return ~a; }",
+          [expr-to-js(branches.first.test), expr-to-js(branches.first.body), elseifs, expr-to-js(_else)]))
     | s_app(_, f, args) =>
       format("~a.app(~a)", [expr-to-js(f), args.map(expr-to-js).join-str(",")])
     | s_obj(_, fields) =>

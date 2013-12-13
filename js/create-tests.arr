@@ -12,7 +12,7 @@ import "pyret-to-js.arr" as P
 
 TESTS-PATH = "test-runner/tests.js"
 
-USE-CPS = true
+USE-CPS = false
 
 JS-ENV = N.library-env.{
   equiv: true,
