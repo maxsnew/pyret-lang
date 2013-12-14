@@ -99,6 +99,13 @@ var PYRET = (function () {
 	    else if (isNothing(val)) {
 		return makeString("nothing");
 	    }
+	    else if (isObject(val)) {
+		var arr = [];
+		for (var i in val.dict) {
+		    arr.push(i + ": " + toRepr(val.dict[i]).s);
+		}
+		return makeString("{" + arr.join(", ") + "}");
+	    }
 	    throw ("toStringJS on an unknown type: " + val);
 	}
 
@@ -168,9 +175,11 @@ var PYRET = (function () {
 		})
 	    }),
 	    runtime: {
+		makeObject: makeObject,
 		makeNumber: makeNumber,
 		makeFunction: makeFunction,
 		isNumber: isNumber,
+		isObject: isObject,
 		makeBool: makeBool,
 		isBool: isBool,
 		isTrue: isTrue,
