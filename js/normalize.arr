@@ -164,6 +164,6 @@ fun normalize(M, k):
             end)
         end)
       
-    | else => raise("NYI")
+    | else => raise("NYI in anf: " + torepr(M))
   end
 end
